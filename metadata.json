@@ -1,0 +1,6 @@
+{
+  "name": "CHUG! — Sip Happens. Stay Hydrated.",
+  "description": "The high-voltage Pop Art hydration tracking and smart reminder app. Level up your drip and stay hydrated with zero delulu.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
