@@ -20,6 +20,9 @@ export const ProfileScreen: React.FC = () => {
     showToast,
     setShowAuthModal,
     setAuthViewMode,
+    authUser,
+    signOut,
+    isSupabaseReady,
   } = useHydration();
 
   const [showGoalModal, setShowGoalModal] = useState<boolean>(false);
@@ -508,11 +511,48 @@ export const ProfileScreen: React.FC = () => {
             </h2>
           </div>
           <span className="bg-[#FFE600] text-black font-label-sm text-[10px] px-2 py-0.5 rounded comic-border-2 font-bold uppercase">
-            LOCAL GUEST
+            {authUser ? 'SUPABASE SYNCED' : isSupabaseReady ? 'SUPABASE READY' : 'LOCAL GUEST'}
           </span>
         </div>
 
         <div className="p-4 flex flex-col gap-3">
+          {/* Supabase Account & Sync Status Box */}
+          <div className="flex items-center justify-between p-3 bg-[#F5EFE6] dark:bg-[#201f1f] rounded-lg comic-border-2">
+            <div className="flex flex-col min-w-0 pr-2">
+              <span className="font-title-md text-[13px] uppercase text-black dark:text-white font-bold truncate">
+                {authUser ? `HERO: ${authUser.email}` : 'GUEST MODE'}
+              </span>
+              <span className="font-body-md text-[11px] text-[#00677f] dark:text-[#7cf4ff] font-bold">
+                {authUser
+                  ? '⚡ PostgreSQL & RLS Realtime Storage'
+                  : isSupabaseReady
+                  ? 'Supabase backend ready for login & sync'
+                  : 'Operating in local offline storage mode'}
+              </span>
+            </div>
+            {authUser ? (
+              <button
+                type="button"
+                onClick={signOut}
+                className="px-3 py-1.5 rounded comic-border-2 font-label text-[10px] uppercase font-bold cursor-pointer bg-white dark:bg-[#131313] text-red-500 hover:bg-rose-100 shrink-0"
+              >
+                LOG OUT
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  comicAudio.playPop();
+                  setAuthViewMode('login');
+                  setShowAuthModal(true);
+                }}
+                className="px-3 py-1.5 rounded comic-border-2 font-label text-[10px] uppercase font-bold cursor-pointer bg-[#FFE600] text-black hover:bg-yellow-300 shrink-0 shadow-sm"
+              >
+                LOG IN
+              </button>
+            )}
+          </div>
+
           {/* Unit Selector & Audio SFX */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Unit */}

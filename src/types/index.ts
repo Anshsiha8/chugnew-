@@ -62,4 +62,10 @@ export interface HydrationPreferences {
   visualTheme: VisualTheme;
 }
 
+export interface AuthUser {
+  id: string;
+  email?: string;
+  displayName?: string;
+}
+
 export type ScreenTab = 'daily-hydration' | 'hydration-history' | 'hydration-insights' | 'profile-settings';

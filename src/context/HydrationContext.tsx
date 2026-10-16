@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   DrinkItem,
   DayRecord,
@@ -8,10 +8,16 @@ import {
   HydrationPreferences,
   ScreenTab,
   VisualTheme,
+  AuthUser,
 } from '../types';
 import { comicAudio } from '../utils/audio';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 
 const STORAGE_KEY = 'CHUG_APP_STORAGE_V2';
+
+export function getTodayDateKey(date = new Date()): string {
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
 
 // Seeded October 2026 hydration history database matching the Stitch reference
 const initialDatabase: Record<string, DayRecord> = {
@@ -155,6 +161,10 @@ interface HydrationContextType {
   setShowAuthModal: (open: boolean) => void;
   authViewMode: 'landing' | 'register' | 'login' | 'forgot' | 'onboarding';
   setAuthViewMode: (mode: 'landing' | 'register' | 'login' | 'forgot' | 'onboarding') => void;
+  authUser: AuthUser | null;
+  isLoadingAuth: boolean;
+  isSyncing: boolean;
+  isSupabaseReady: boolean;
   profile: UserProfile;
   schedule: DailySchedule;
   activities: WorkoutActivity[];
@@ -162,19 +172,23 @@ interface HydrationContextType {
   database: Record<string, DayRecord>;
   todayKey: string;
   todayRecord: DayRecord;
-  addWater: (amount: number, label: string, tag: string, icon?: string) => void;
-  undoLastDrink: () => void;
-  deleteDrink: (id: string, dateKey?: string) => void;
-  editDrink: (id: string, newMl: number, dateKey?: string) => void;
-  resetToday: () => void;
-  addPastDrink: (dateKey: string, item: DrinkItem) => void;
-  wipeAllData: () => void;
-  updateProfile: (updates: Partial<UserProfile>) => void;
-  updateSchedule: (updates: Partial<DailySchedule>) => void;
-  updatePreferences: (updates: Partial<HydrationPreferences>) => void;
-  addActivity: (act: WorkoutActivity) => void;
-  updateActivity: (act: WorkoutActivity) => void;
-  deleteActivity: (id: string) => void;
+  addWater: (amount: number, label: string, tag: string, icon?: string) => Promise<void>;
+  undoLastDrink: () => Promise<void>;
+  deleteDrink: (id: string, dateKey?: string) => Promise<void>;
+  editDrink: (id: string, newMl: number, dateKey?: string) => Promise<void>;
+  resetToday: () => Promise<void>;
+  addPastDrink: (dateKey: string, item: DrinkItem) => Promise<void>;
+  wipeAllData: () => Promise<void>;
+  updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
+  updateSchedule: (updates: Partial<DailySchedule>) => Promise<void>;
+  updatePreferences: (updates: Partial<HydrationPreferences>) => Promise<void>;
+  addActivity: (act: WorkoutActivity) => Promise<void>;
+  updateActivity: (act: WorkoutActivity) => Promise<void>;
+  deleteActivity: (id: string) => Promise<void>;
+  signUp: (email: string, pass: string, name: string) => Promise<{ error: string | null }>;
+  signIn: (email: string, pass: string) => Promise<{ error: string | null }>;
+  signOut: () => Promise<void>;
+  resetPasswordForEmail: (email: string) => Promise<{ error: string | null }>;
   toastMessage: string | null;
   showToast: (msg: string) => void;
   setVisualTheme: (theme: VisualTheme) => void;
@@ -187,8 +201,13 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
   const [authViewMode, setAuthViewMode] = useState<'landing' | 'register' | 'login' | 'forgot' | 'onboarding'>('landing');
 
+  // Supabase Auth and Sync State
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [isLoadingAuth, setIsLoadingAuth] = useState<boolean>(isSupabaseConfigured);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+
   // Today key defaults to October 24, 2026 matching the Stitch design
-  const [todayKey, setTodayKey] = useState<string>('2026-9-24');
+  const [todayKey] = useState<string>('2026-9-24');
 
   const [profile, setProfile] = useState<UserProfile>(() => {
     try {
@@ -237,6 +256,14 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    comicAudio.playSplash();
+    setTimeout(() => {
+      setToastMessage((current) => (current === msg ? null : current));
+    }, 3200);
+  }, []);
+
   // Sync SFX state with audio engine
   useEffect(() => {
     comicAudio.enabled = preferences.sfxEnabled;
@@ -244,20 +271,25 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // Sync theme with HTML class & body styles
   useEffect(() => {
-    if (preferences.visualTheme === 'midnight_ink') {
+    const isDark = preferences.visualTheme === 'midnight_ink';
+    if (isDark) {
       document.documentElement.classList.add('dark');
       document.body.classList.add('dark');
+      document.documentElement.setAttribute('data-theme', 'dark');
+      document.documentElement.style.colorScheme = 'dark';
       document.body.style.backgroundColor = '#131313';
       document.body.style.color = '#e5e2e1';
     } else {
       document.documentElement.classList.remove('dark');
       document.body.classList.remove('dark');
+      document.documentElement.setAttribute('data-theme', 'light');
+      document.documentElement.style.colorScheme = 'light';
       document.body.style.backgroundColor = '#FDFBF7';
       document.body.style.color = '#000000';
     }
   }, [preferences.visualTheme]);
 
-  // Persist state to localStorage
+  // Persist state to localStorage for offline access
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY + '_profile', JSON.stringify(profile));
@@ -270,20 +302,305 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   }, [profile, schedule, activities, preferences, database]);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    comicAudio.playSplash();
-    setTimeout(() => {
-      setToastMessage((current) => (current === msg ? null : current));
-    }, 3200);
+  // -----------------------------------------------------------------------
+  // SUPABASE BACKEND DATA LOADING & REALTIME SYNC
+  // -----------------------------------------------------------------------
+  const loadUserDataFromSupabase = useCallback(async (userId: string) => {
+    if (!supabase) return;
+    setIsSyncing(true);
+    try {
+      // 1. Load User Profile
+      const { data: profData, error: profErr } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (profData && !profErr) {
+        setProfile((prev) => ({
+          ...prev,
+          displayName: profData.display_name || prev.displayName,
+          email: profData.email || prev.email,
+          age: profData.age ?? prev.age,
+          weightKg: profData.weight_kg ? Number(profData.weight_kg) : prev.weightKg,
+          activityLevel: profData.activity_level || prev.activityLevel,
+          preferredUnit: profData.preferred_unit || prev.preferredUnit,
+          roleTag: profData.role_tag || prev.roleTag,
+          quote: profData.quote || prev.quote,
+        }));
+      }
+
+      // 2. Load Schedule & Hydration Preferences
+      const { data: schedData, error: schedErr } = await supabase
+        .from('schedule_preferences')
+        .select('*')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (schedData && !schedErr) {
+        setSchedule((prev) => ({
+          ...prev,
+          wakeUpTime: schedData.wake_up_time || prev.wakeUpTime,
+          bedtime: schedData.bedtime || prev.bedtime,
+          firstReminderTime: schedData.first_reminder_time || prev.firstReminderTime,
+          lastReminderTime: schedData.last_reminder_time || prev.lastReminderTime,
+          differentWeekendSchedule: schedData.different_weekend_schedule ?? prev.differentWeekendSchedule,
+        }));
+
+        setPreferences((prev) => ({
+          ...prev,
+          dailyGoalMl: schedData.daily_goal_ml || prev.dailyGoalMl,
+          reminderIntervalMinutes: schedData.reminder_interval_minutes || prev.reminderIntervalMinutes,
+          remindersEnabled: schedData.reminders_enabled ?? prev.remindersEnabled,
+          quietHours: schedData.quiet_hours || prev.quietHours,
+          reminderStyle: schedData.reminder_style || prev.reminderStyle,
+          pauseWhenGoalReached: schedData.pause_when_goal_reached ?? prev.pauseWhenGoalReached,
+          intelligentPacing: schedData.intelligent_pacing ?? prev.intelligentPacing,
+          sfxEnabled: schedData.sfx_enabled ?? prev.sfxEnabled,
+          visualTheme: schedData.visual_theme || prev.visualTheme,
+        }));
+      }
+
+      // 3. Load Workout Activities
+      const { data: actData, error: actErr } = await supabase
+        .from('workout_activities')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: true });
+
+      if (actData && !actErr && actData.length > 0) {
+        setActivities(
+          actData.map((a) => ({
+            id: a.id,
+            type: a.type,
+            customName: a.custom_name || a.type,
+            startTime: a.start_time,
+            endTime: a.end_time,
+            daysOfWeek: a.days_of_week || ['Mon', 'Wed', 'Fri'],
+            pauseReminders: a.pause_reminders ?? true,
+            resumeAfterActivity: a.resume_after_activity ?? true,
+          }))
+        );
+      }
+
+      // 4. Load Water Logs
+      const { data: logsData, error: logsErr } = await supabase
+        .from('water_logs')
+        .select('*')
+        .eq('user_id', userId)
+        .order('logged_at', { ascending: false });
+
+      if (logsData && !logsErr) {
+        // Group logs into DayRecord map
+        const userRecords: Record<string, DrinkItem[]> = {};
+
+        logsData.forEach((row) => {
+          const dKey = row.date_key;
+          if (!userRecords[dKey]) userRecords[dKey] = [];
+          userRecords[dKey].push({
+            id: row.id,
+            time: row.time_str,
+            name: row.name,
+            ml: row.amount_ml,
+            tag: row.tag || 'VALID SIP',
+            sub: row.sub || 'Hydration Intake',
+            icon: row.icon || 'water_drop',
+            bg: 'bg-[#00D2FF]',
+            iconColor: 'text-black',
+          });
+        });
+
+        // Map authenticated user's saved records
+        const realDb: Record<string, DayRecord> = {};
+        Object.keys(userRecords).forEach((key) => {
+          realDb[key] = {
+            goal: schedData?.daily_goal_ml || 2500,
+            drinks: userRecords[key],
+          };
+        });
+
+        // Ensure todayKey exists for active logging
+        if (!realDb[todayKey]) {
+          realDb[todayKey] = {
+            goal: schedData?.daily_goal_ml || 2500,
+            drinks: [],
+          };
+        }
+
+        setDatabase(realDb);
+      }
+    } catch (err) {
+      console.warn('Notice: Could not sync from Supabase tables yet. Local state active.', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, []);
+
+  // Initialize Supabase Auth Session listener
+  useEffect(() => {
+    if (!supabase) {
+      setIsLoadingAuth(false);
+      return;
+    }
+
+    // Check initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setAuthUser({
+          id: session.user.id,
+          email: session.user.email,
+          displayName: session.user.user_metadata?.display_name || session.user.email?.split('@')[0],
+        });
+        loadUserDataFromSupabase(session.user.id);
+      }
+      setIsLoadingAuth(false);
+    });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setAuthUser({
+          id: session.user.id,
+          email: session.user.email,
+          displayName: session.user.user_metadata?.display_name || session.user.email?.split('@')[0],
+        });
+        loadUserDataFromSupabase(session.user.id);
+      } else {
+        setAuthUser(null);
+      }
+      setIsLoadingAuth(false);
+    });
+
+    return () => {
+      authListener?.subscription.unsubscribe();
+    };
+  }, [loadUserDataFromSupabase]);
+
+  // -----------------------------------------------------------------------
+  // AUTHENTICATION METHODS
+  // -----------------------------------------------------------------------
+  const signUp = async (email: string, pass: string, name: string): Promise<{ error: string | null }> => {
+    if (!supabase) {
+      // Local fallback
+      updateProfile({ displayName: name, email });
+      setAuthUser({ id: 'local-user', email, displayName: name });
+      return { error: null };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password: pass,
+        options: {
+          data: {
+            display_name: name,
+          },
+        },
+      });
+
+      if (error) {
+        return { error: error.message };
+      }
+
+      if (data.user) {
+        setAuthUser({
+          id: data.user.id,
+          email: data.user.email,
+          displayName: name,
+        });
+
+        // Upsert default profile record
+        await supabase.from('profiles').upsert({
+          id: data.user.id,
+          display_name: name,
+          email: data.user.email,
+        });
+
+        // Upsert default schedule & preferences
+        await supabase.from('schedule_preferences').upsert({
+          user_id: data.user.id,
+          daily_goal_ml: 2500,
+          reminder_interval_minutes: 60,
+        });
+      }
+
+      return { error: null };
+    } catch (err: unknown) {
+      return { error: err instanceof Error ? err.message : 'Sign-up failed' };
+    }
   };
 
+  const signIn = async (email: string, pass: string): Promise<{ error: string | null }> => {
+    if (!supabase) {
+      // Local fallback
+      updateProfile({ email });
+      setAuthUser({ id: 'local-user', email, displayName: profile.displayName });
+      return { error: null };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password: pass,
+      });
+
+      if (error) {
+        return { error: error.message };
+      }
+
+      if (data.user) {
+        setAuthUser({
+          id: data.user.id,
+          email: data.user.email,
+          displayName: data.user.user_metadata?.display_name || data.user.email?.split('@')[0],
+        });
+        await loadUserDataFromSupabase(data.user.id);
+      }
+
+      return { error: null };
+    } catch (err: unknown) {
+      return { error: err instanceof Error ? err.message : 'Sign-in failed' };
+    }
+  };
+
+  const signOut = async () => {
+    comicAudio.playPop();
+    if (supabase) {
+      try {
+        await supabase.auth.signOut();
+      } catch (e) {
+        console.warn('Sign out error', e);
+      }
+    }
+    setAuthUser(null);
+    setProfile(defaultProfile);
+    setSchedule(defaultSchedule);
+    setActivities(defaultActivities);
+    setPreferences(defaultPreferences);
+    setDatabase(initialDatabase);
+    showToast('LOGGED OUT. RETURNED TO GUEST MODE.');
+  };
+
+  const resetPasswordForEmail = async (email: string): Promise<{ error: string | null }> => {
+    if (!supabase) return { error: null };
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin,
+      });
+      return { error: error ? error.message : null };
+    } catch (err: unknown) {
+      return { error: err instanceof Error ? err.message : 'Reset failed' };
+    }
+  };
+
+  // -----------------------------------------------------------------------
+  // DATA OPERATIONS WITH POSTGRES & RLS PERSISTENCE
+  // -----------------------------------------------------------------------
   const todayRecord: DayRecord = database[todayKey] || {
     goal: preferences.dailyGoalMl,
     drinks: [],
   };
 
-  const addWater = (amount: number, label: string, tag: string, icon?: string) => {
+  const addWater = async (amount: number, label: string, tag: string, icon?: string) => {
     const now = new Date();
     let hours = now.getHours();
     const minutes = String(now.getMinutes()).padStart(2, '0');
@@ -291,8 +608,9 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     hours = hours % 12 || 12;
     const timeStr = `${String(hours).padStart(2, '0')}:${minutes} ${ampm}`;
 
+    const newDrinkId = `drink-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const newDrink: DrinkItem = {
-      id: `drink-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      id: newDrinkId,
       time: timeStr,
       name: label,
       ml: amount,
@@ -303,6 +621,7 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       iconColor: 'text-black',
     };
 
+    // Optimistic UI update
     setDatabase((prev) => {
       const currentDay = prev[todayKey] || { goal: preferences.dailyGoalMl, drinks: [] };
       return {
@@ -316,15 +635,51 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     comicAudio.playPop();
     showToast(`WHAM! +${amount} ML TANK CHARGED!`);
+
+    // Supabase DB Persistence
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        const { data, error } = await supabase.from('water_logs').insert({
+          user_id: authUser.id,
+          date_key: todayKey,
+          amount_ml: amount,
+          name: label,
+          tag: tag || 'VALID SIP',
+          sub: 'Hydration Intake',
+          time_str: timeStr,
+          icon: icon || 'water_drop',
+        }).select('id').maybeSingle();
+
+        if (data?.id) {
+          // Sync server-assigned UUID
+          setDatabase((prev) => {
+            const day = prev[todayKey];
+            if (!day) return prev;
+            return {
+              ...prev,
+              [todayKey]: {
+                ...day,
+                drinks: day.drinks.map((d) => (d.id === newDrinkId ? { ...d, id: data.id } : d)),
+              },
+            };
+          });
+        }
+        if (error) console.warn('Supabase water_logs insert notice:', error);
+      } catch (err) {
+        console.warn('water_logs insert error', err);
+      }
+    }
   };
 
-  const undoLastDrink = () => {
+  const undoLastDrink = async () => {
     const currentDay = database[todayKey];
     if (!currentDay || currentDay.drinks.length === 0) {
       showToast('NO SIP TO UNDO, HERO!');
       return;
     }
     const removed = currentDay.drinks[0];
+
+    // Optimistic update
     setDatabase((prev) => {
       const day = prev[todayKey];
       if (!day) return prev;
@@ -336,46 +691,74 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         },
       };
     });
+
     comicAudio.playPop();
     showToast(`UNDO! -${removed.ml} ML REVERSED`);
+
+    // Supabase DB Delete
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('water_logs').delete().eq('id', removed.id);
+      } catch (err) {
+        console.warn('undo water_logs delete error', err);
+      }
+    }
   };
 
-  const deleteDrink = (id: string, dateKey = todayKey) => {
+  const deleteDrink = async (id: string, dateKey = todayKey) => {
+    let removedAmount = 0;
     setDatabase((prev) => {
       const day = prev[dateKey];
       if (!day) return prev;
       const target = day.drinks.find((d) => d.id === id);
-      const updatedDrinks = day.drinks.filter((d) => d.id !== id);
-      if (target) {
-        showToast(`REMOVED -${target.ml} ML ENTRY`);
-      }
+      if (target) removedAmount = target.ml;
       return {
         ...prev,
         [dateKey]: {
           ...day,
-          drinks: updatedDrinks,
+          drinks: day.drinks.filter((d) => d.id !== id),
         },
       };
     });
+
+    if (removedAmount > 0) {
+      showToast(`REMOVED -${removedAmount} ML ENTRY`);
+    }
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('water_logs').delete().eq('id', id);
+      } catch (err) {
+        console.warn('delete water_logs error', err);
+      }
+    }
   };
 
-  const editDrink = (id: string, newMl: number, dateKey = todayKey) => {
+  const editDrink = async (id: string, newMl: number, dateKey = todayKey) => {
     setDatabase((prev) => {
       const day = prev[dateKey];
       if (!day) return prev;
-      const updated = day.drinks.map((d) => (d.id === id ? { ...d, ml: newMl } : d));
       return {
         ...prev,
         [dateKey]: {
           ...day,
-          drinks: updated,
+          drinks: day.drinks.map((d) => (d.id === id ? { ...d, ml: newMl } : d)),
         },
       };
     });
+
     showToast(`UPDATED TO ${newMl} ML!`);
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('water_logs').update({ amount_ml: newMl }).eq('id', id);
+      } catch (err) {
+        console.warn('edit water_logs error', err);
+      }
+    }
   };
 
-  const addPastDrink = (dateKey: string, item: DrinkItem) => {
+  const addPastDrink = async (dateKey: string, item: DrinkItem) => {
     setDatabase((prev) => {
       const day = prev[dateKey] || { goal: preferences.dailyGoalMl, drinks: [] };
       return {
@@ -386,11 +769,43 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         },
       };
     });
+
     comicAudio.playPop();
     showToast(`LOGGED ${item.ml} ML TO ARCHIVE!`);
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        const { data } = await supabase.from('water_logs').insert({
+          user_id: authUser.id,
+          date_key: dateKey,
+          amount_ml: item.ml,
+          name: item.name,
+          tag: item.tag || 'LOGGED',
+          sub: item.sub || 'Manual Entry',
+          time_str: item.time,
+          icon: item.icon || 'water_drop',
+        }).select('id').maybeSingle();
+
+        if (data?.id) {
+          setDatabase((prev) => {
+            const day = prev[dateKey];
+            if (!day) return prev;
+            return {
+              ...prev,
+              [dateKey]: {
+                ...day,
+                drinks: day.drinks.map((d) => (d.id === item.id ? { ...d, id: data.id } : d)),
+              },
+            };
+          });
+        }
+      } catch (err) {
+        console.warn('addPastDrink error', err);
+      }
+    }
   };
 
-  const resetToday = () => {
+  const resetToday = async () => {
     setDatabase((prev) => ({
       ...prev,
       [todayKey]: {
@@ -398,54 +813,184 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         drinks: [],
       },
     }));
+
     comicAudio.playBoing();
     showToast('RESET COMPLETE! BACK TO ZERO — TIME TO CHUG!');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('water_logs').delete().eq('user_id', authUser.id).eq('date_key', todayKey);
+      } catch (err) {
+        console.warn('resetToday error', err);
+      }
+    }
   };
 
-  const wipeAllData = () => {
+  const wipeAllData = async () => {
     setDatabase({
       [todayKey]: {
         goal: preferences.dailyGoalMl,
         drinks: [],
       },
     });
+
     comicAudio.playBoing();
     showToast('HYDRATION DATA WIPED CLEAN!');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('water_logs').delete().eq('user_id', authUser.id);
+      } catch (err) {
+        console.warn('wipeAllData error', err);
+      }
+    }
   };
 
-  const updateProfile = (updates: Partial<UserProfile>) => {
+  const updateProfile = async (updates: Partial<UserProfile>) => {
     setProfile((prev) => ({ ...prev, ...updates }));
     showToast('PROFILE UPDATED!');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('profiles').upsert({
+          id: authUser.id,
+          display_name: updates.displayName || profile.displayName,
+          email: updates.email || profile.email,
+          age: updates.age ?? profile.age,
+          weight_kg: updates.weightKg ?? profile.weightKg,
+          activity_level: updates.activityLevel || profile.activityLevel,
+          preferred_unit: updates.preferredUnit || profile.preferredUnit,
+          role_tag: updates.roleTag || profile.roleTag,
+          quote: updates.quote || profile.quote,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn('updateProfile error', err);
+      }
+    }
   };
 
-  const updateSchedule = (updates: Partial<DailySchedule>) => {
+  const updateSchedule = async (updates: Partial<DailySchedule>) => {
     setSchedule((prev) => ({ ...prev, ...updates }));
     showToast('CADENCE UPDATED!');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('schedule_preferences').upsert({
+          user_id: authUser.id,
+          wake_up_time: updates.wakeUpTime || schedule.wakeUpTime,
+          bedtime: updates.bedtime || schedule.bedtime,
+          first_reminder_time: updates.firstReminderTime || schedule.firstReminderTime,
+          last_reminder_time: updates.lastReminderTime || schedule.lastReminderTime,
+          different_weekend_schedule: updates.differentWeekendSchedule ?? schedule.differentWeekendSchedule,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn('updateSchedule error', err);
+      }
+    }
   };
 
-  const updatePreferences = (updates: Partial<HydrationPreferences>) => {
+  const updatePreferences = async (updates: Partial<HydrationPreferences>) => {
     setPreferences((prev) => ({ ...prev, ...updates }));
     showToast('PREFERENCES SAVED!');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('schedule_preferences').upsert({
+          user_id: authUser.id,
+          daily_goal_ml: updates.dailyGoalMl ?? preferences.dailyGoalMl,
+          reminder_interval_minutes: updates.reminderIntervalMinutes ?? preferences.reminderIntervalMinutes,
+          reminders_enabled: updates.remindersEnabled ?? preferences.remindersEnabled,
+          quiet_hours: updates.quietHours || preferences.quietHours,
+          reminder_style: updates.reminderStyle || preferences.reminderStyle,
+          pause_when_goal_reached: updates.pauseWhenGoalReached ?? preferences.pauseWhenGoalReached,
+          intelligent_pacing: updates.intelligentPacing ?? preferences.intelligentPacing,
+          sfx_enabled: updates.sfxEnabled ?? preferences.sfxEnabled,
+          visual_theme: updates.visualTheme || preferences.visualTheme,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn('updatePreferences error', err);
+      }
+    }
   };
 
-  const setVisualTheme = (theme: VisualTheme) => {
+  const setVisualTheme = async (theme: VisualTheme) => {
     setPreferences((prev) => ({ ...prev, visualTheme: theme }));
     showToast(theme === 'midnight_ink' ? '🌙 MIDNIGHT INK ACTIVATED!' : '☀️ POP CREAM ACTIVATED!');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('schedule_preferences').upsert({
+          user_id: authUser.id,
+          visual_theme: theme,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn('Persist theme notice', err);
+      }
+    }
   };
 
-  const addActivity = (act: WorkoutActivity) => {
+  const addActivity = async (act: WorkoutActivity) => {
     setActivities((prev) => [...prev, act]);
     showToast(`ADDED SESSION: ${act.customName || act.type}`);
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        const { data } = await supabase.from('workout_activities').insert({
+          user_id: authUser.id,
+          type: act.type,
+          custom_name: act.customName || act.type,
+          start_time: act.startTime,
+          end_time: act.endTime,
+          days_of_week: act.daysOfWeek,
+          pause_reminders: act.pauseReminders,
+          resume_after_activity: act.resumeAfterActivity,
+        }).select('id').maybeSingle();
+
+        if (data?.id) {
+          setActivities((prev) => prev.map((a) => (a.id === act.id ? { ...a, id: data.id } : a)));
+        }
+      } catch (err) {
+        console.warn('addActivity error', err);
+      }
+    }
   };
 
-  const updateActivity = (act: WorkoutActivity) => {
+  const updateActivity = async (act: WorkoutActivity) => {
     setActivities((prev) => prev.map((a) => (a.id === act.id ? act : a)));
     showToast('SESSION UPDATED!');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('workout_activities').update({
+          type: act.type,
+          custom_name: act.customName || act.type,
+          start_time: act.startTime,
+          end_time: act.endTime,
+          days_of_week: act.daysOfWeek,
+          pause_reminders: act.pauseReminders,
+          resume_after_activity: act.resumeAfterActivity,
+        }).eq('id', act.id);
+      } catch (err) {
+        console.warn('updateActivity error', err);
+      }
+    }
   };
 
-  const deleteActivity = (id: string) => {
+  const deleteActivity = async (id: string) => {
     setActivities((prev) => prev.filter((a) => a.id !== id));
     showToast('SESSION REMOVED');
+
+    if (supabase && authUser?.id && authUser.id !== 'local-user') {
+      try {
+        await supabase.from('workout_activities').delete().eq('id', id);
+      } catch (err) {
+        console.warn('deleteActivity error', err);
+      }
+    }
   };
 
   return (
@@ -457,6 +1002,10 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setShowAuthModal,
         authViewMode,
         setAuthViewMode,
+        authUser,
+        isLoadingAuth,
+        isSyncing,
+        isSupabaseReady: isSupabaseConfigured,
         profile,
         schedule,
         activities,
@@ -477,6 +1026,10 @@ export const HydrationProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         addActivity,
         updateActivity,
         deleteActivity,
+        signUp,
+        signIn,
+        signOut,
+        resetPasswordForEmail,
         toastMessage,
         showToast,
         setVisualTheme,

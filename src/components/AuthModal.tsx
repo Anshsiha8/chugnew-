@@ -18,6 +18,10 @@ export const AuthModal: React.FC = () => {
     updatePreferences,
     addActivity,
     deleteActivity,
+    signUp,
+    signIn,
+    resetPasswordForEmail,
+    isSupabaseReady,
     showToast,
   } = useHydration();
 
@@ -31,9 +35,11 @@ export const AuthModal: React.FC = () => {
   const [regConfirm, setRegConfirm] = useState('');
   const [regTerms, setRegTerms] = useState(false);
   const [regError, setRegError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [loginEmail, setLoginEmail] = useState('alex@example.com');
   const [loginPass, setLoginPass] = useState('waterhero123');
+  const [loginError, setLoginError] = useState('');
 
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
@@ -59,8 +65,9 @@ export const AuthModal: React.FC = () => {
 
   if (!showAuthModal) return null;
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setRegError('');
     if (!regName.trim() || !regEmail.trim()) {
       setRegError('Please provide your name and email.');
       return;
@@ -73,46 +80,68 @@ export const AuthModal: React.FC = () => {
       setRegError('Passwords do not match.');
       return;
     }
+
+    setIsSubmitting(true);
     comicAudio.playPop();
-    updateProfile({ displayName: regName, email: regEmail });
+
+    const result = await signUp(regEmail.trim(), regPass, regName.trim());
+    setIsSubmitting(false);
+
+    if (result.error) {
+      setRegError(result.error);
+      return;
+    }
+
+    setObName(regName.trim());
     setAuthViewMode('onboarding');
     setOnboardingStep(1);
-    showToast('DEMO PROFILE CREATED! WELCOME HERO!');
+    showToast('HERO ACCOUNT REGISTERED! LET’S LOCK IN!');
   };
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoginError('');
+    setIsSubmitting(true);
     comicAudio.playPop();
-    if (loginEmail) {
-      updateProfile({ email: loginEmail });
+
+    const result = await signIn(loginEmail.trim(), loginPass);
+    setIsSubmitting(false);
+
+    if (result.error) {
+      setLoginError(result.error);
+      return;
     }
+
     setShowAuthModal(false);
     showToast('WELCOME BACK TO CHUG!');
   };
 
-  const handleForgotSubmit = (e: React.FormEvent) => {
+  const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsSubmitting(true);
     comicAudio.playPop();
+    await resetPasswordForEmail(forgotEmail.trim());
+    setIsSubmitting(false);
     setForgotSent(true);
   };
 
-  const handleCompleteOnboarding = () => {
+  const handleCompleteOnboarding = async () => {
     comicAudio.playBoing();
-    updateProfile({
+    await updateProfile({
       displayName: obName || 'Alex Rivera',
       age: obAge,
       weightKg: obWeight,
       preferredUnit: obUnit,
       activityLevel: obActLevel,
     });
-    updateSchedule({
+    await updateSchedule({
       wakeUpTime: obWake,
       bedtime: obBed,
       firstReminderTime: obFirstAlert,
       lastReminderTime: obLastAlert,
       differentWeekendSchedule: obSplitSchedule,
     });
-    updatePreferences({
+    await updatePreferences({
       dailyGoalMl: obGoal,
       reminderIntervalMinutes: obInterval,
       reminderStyle: obStyle,
@@ -255,13 +284,15 @@ export const AuthModal: React.FC = () => {
             </button>
             <div className="bg-white dark:bg-[#1c1b1b] comic-border-thick rounded-2xl p-4 shadow-pop">
               <div className="inline-block bg-[#FF2D78] text-white font-bold text-[10px] px-2 py-0.5 rounded comic-border shadow-pop-sm -rotate-2 mb-2">
-                FRONTEND DEMO AUTH
+                {isSupabaseReady ? 'SUPABASE AUTH' : 'FRONTEND DEMO AUTH'}
               </div>
               <h2 className="font-headline text-2xl uppercase leading-tight mb-1">
                 JOIN THE <span className="text-[#2455FF]">CHUG!</span> SQUAD
               </h2>
               <p className="text-xs font-bold mb-3">
-                Create your demo profile in seconds. All data stays in your browser.
+                {isSupabaseReady
+                  ? 'Create your permanent hero account powered by Supabase.'
+                  : 'Create your demo profile in seconds. All data stays in your browser.'}
               </p>
 
               {regError && (
@@ -338,9 +369,10 @@ export const AuthModal: React.FC = () => {
                 </div>
                 <button
                   type="submit"
-                  className="pop-btn w-full py-3 bg-[#FFE600] text-black font-headline text-lg tracking-wide rounded-xl comic-border shadow-pop uppercase flex items-center justify-center gap-1.5 cursor-pointer mt-2"
+                  disabled={isSubmitting}
+                  className="pop-btn w-full py-3 bg-[#FFE600] text-black font-headline text-lg tracking-wide rounded-xl comic-border shadow-pop uppercase flex items-center justify-center gap-1.5 cursor-pointer mt-2 disabled:opacity-60"
                 >
-                  <span>LET'S GO!</span>
+                  <span>{isSubmitting ? '⚡ CREATING ACCOUNT...' : "LET'S GO!"}</span>
                   <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
                 </button>
               </form>
@@ -368,14 +400,22 @@ export const AuthModal: React.FC = () => {
             </button>
             <div className="bg-white dark:bg-[#1c1b1b] comic-border-thick rounded-2xl p-4 shadow-pop">
               <div className="inline-block bg-[#00D2FF] text-black font-bold text-[10px] px-2 py-0.5 rounded comic-border shadow-pop-sm -rotate-2 mb-2">
-                WELCOME BACK HERO
+                {isSupabaseReady ? 'SUPABASE AUTH' : 'WELCOME BACK HERO'}
               </div>
               <h2 className="font-headline text-2xl uppercase leading-tight mb-1">
                 LOG IN TO <span className="text-[#2455FF]">CHUG!</span>
               </h2>
               <p className="text-xs font-bold mb-3">
-                Enter your credentials or test with default hero demo.
+                {isSupabaseReady
+                  ? 'Enter your Supabase credentials to sync your hydration streaks.'
+                  : 'Enter your credentials or test with default hero demo.'}
               </p>
+
+              {loginError && (
+                <div className="p-2 bg-rose-100 text-[#ba1a1a] rounded comic-border-2 text-xs font-bold mb-2">
+                  {loginError}
+                </div>
+              )}
 
               <form onSubmit={handleLoginSubmit} className="space-y-3">
                 <div>
@@ -415,9 +455,10 @@ export const AuthModal: React.FC = () => {
                 </div>
                 <button
                   type="submit"
-                  className="pop-btn w-full py-3 bg-[#2455FF] text-white font-headline text-lg tracking-wide rounded-xl comic-border shadow-pop uppercase flex items-center justify-center gap-1.5 cursor-pointer mt-2"
+                  disabled={isSubmitting}
+                  className="pop-btn w-full py-3 bg-[#2455FF] text-white font-headline text-lg tracking-wide rounded-xl comic-border shadow-pop uppercase flex items-center justify-center gap-1.5 cursor-pointer mt-2 disabled:opacity-60"
                 >
-                  <span>LOG IN</span>
+                  <span>{isSubmitting ? '⚡ LOGGING IN...' : 'LOG IN'}</span>
                   <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
                 </button>
               </form>

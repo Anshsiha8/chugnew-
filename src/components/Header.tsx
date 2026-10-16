@@ -9,7 +9,7 @@ const screenTitles: Record<string, string> = {
 };
 
 export const Header: React.FC = () => {
-  const { activeTab, setActiveTab, setShowAuthModal, setAuthViewMode } = useHydration();
+  const { activeTab, setActiveTab, setShowAuthModal, setAuthViewMode, preferences, setVisualTheme } = useHydration();
 
   const handleProfileClick = () => {
     setActiveTab('profile-settings');
@@ -60,6 +60,16 @@ export const Header: React.FC = () => {
             title="Open Onboarding Mission & Auth"
           >
             <span>⚡ ONBOARDING</span>
+          </button>
+
+          {/* Quick Visual Theme Toggle */}
+          <button
+            onClick={() => setVisualTheme(preferences.visualTheme === 'midnight_ink' ? 'pop_cream' : 'midnight_ink')}
+            className="w-10 h-10 comic-border-2 rounded-lg comic-shadow-sm bg-white dark:bg-[#201f1f] text-black dark:text-white flex items-center justify-center font-bold text-base active:translate-x-0.5 active:translate-y-0.5 transition-transform cursor-pointer"
+            title={preferences.visualTheme === 'midnight_ink' ? 'Switch to ☀️ Pop Cream theme' : 'Switch to 🌙 Midnight Ink theme'}
+            aria-label="Toggle visual theme"
+          >
+            <span>{preferences.visualTheme === 'midnight_ink' ? '🌙' : '☀️'}</span>
           </button>
 
           <button
